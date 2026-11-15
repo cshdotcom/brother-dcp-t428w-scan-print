@@ -195,7 +195,7 @@ export function Dashboard({ onOpenTask }: { onOpenTask: (id: string) => void }) 
             <Sparkles className="h-3 w-3" />
             AI 智能批改 · 30 秒出分
           </div>
-          <h1 className="fx-text-shimmer fx-on-dark !my-0 !text-xl !font-bold !leading-snug sm:!text-2xl">
+          <h1 className="!my-0 !text-xl !font-bold !leading-snug text-white [text-shadow:0_1px_2px_rgba(0,0,0,0.18)] sm:!text-2xl">
             {username ? `${username}，欢迎回来` : '老师好'}
           </h1>
           <p className="mt-1.5 max-w-md text-[13px] leading-relaxed text-emerald-50/90">
@@ -421,7 +421,7 @@ export function Dashboard({ onOpenTask }: { onOpenTask: (id: string) => void }) 
           <Smartphone className="h-4 w-4" />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block text-sm font-semibold text-white">Android 客户端（v1.1 修复登录闪退）</span>
+          <span className="block text-sm font-semibold text-white">Android 客户端（v1.2 · 稳定版）</span>
           <span className="block truncate text-[11px] text-white/85">
             相机多页连拍 · 透视校正 · 直连打印 · 与网页端同账号（支持 API Key 连接）
           </span>

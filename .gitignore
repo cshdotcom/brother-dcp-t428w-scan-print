@@ -75,8 +75,7 @@ tool-results/
 # 签名密钥不入库（build.sh 缺失时自动生成 debug 密钥）
 *.keystore
 *.jks
-# 大体积桥接二进制走 GitHub Release 分发（public/ 下保留本机副本）
-/public/papermarker-bridge.exe
-/public/papermarker-bridge-linux
+# 大体积桥接二进制走 GitHub Release 分发（本机副本在 storage/bridges，经 /api/download 下发）
+/storage/bridges/
 # 运行时 PID
 .zscripts/dev.pid

@@ -35,6 +35,16 @@ public class LoginActivity extends Activity {
         btnMode = findViewById(R.id.btnMode);
         tvStatus = findViewById(R.id.tvStatus);
 
+        // 上次运行如有崩溃，把日志直接显示出来（而不是无声闪退）
+        String crash = PmApp.lastCrash(this);
+        if (!crash.isEmpty()) {
+            String[] lines = crash.split("\n");
+            String brief = lines.length > 0 ? lines[0] : "";
+            String where = lines.length > 2 ? lines[2] : (lines.length > 1 ? lines[1] : "");
+            tvStatus.setText("上次异常已记录（请反馈给开发者）：\n" + brief + " / " + where);
+            tvStatus.setTextColor(0xFFDC2626);
+        }
+
         // 回填上次输入
         String base = Prefs.getBase(this);
         if (base.isEmpty()) {

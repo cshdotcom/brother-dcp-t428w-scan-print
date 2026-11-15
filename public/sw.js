@@ -9,7 +9,7 @@
  * 注意：本 SW 不缓存 API 响应（API 需实时联网）。
  */
 
-const CACHE = 'papermarker-v1'
+const CACHE = 'papermarker-v2'
 const CORE_ASSETS = ['/', '/icon-192.png', '/icon-512.png', '/manifest.webmanifest']
 
 // 安装：预缓存核心资源

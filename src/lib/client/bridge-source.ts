@@ -51,10 +51,10 @@ export function setBridgeSource(url: string): void {
 /**
  * 拼接桥接文件下载地址：
  *  - 配置了下载源 → `${源}/${file}`
- *  - 未配置 → `/${file}`（本站 public 目录）
+ *  - 未配置 → `/api/download/${file}`（本站流式下载接口，大文件存 storage/bridges）
  */
 export function bridgeFileUrl(file: string): string {
   const base = getBridgeSource()
-  if (!base) return `/${file}`
+  if (!base) return `/api/download/${encodeURIComponent(file)}`
   return `${base}/${file}`
 }

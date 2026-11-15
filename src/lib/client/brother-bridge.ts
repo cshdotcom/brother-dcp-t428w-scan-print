@@ -210,4 +210,3 @@ export function base64ToBlob(base64: string, mime = 'image/jpeg'): Blob {
   return new Blob([arr], { type: mime })
 }
 
-export { DEFAULT_BRIDGE_URL }

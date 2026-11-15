@@ -22,19 +22,25 @@ echo "[2/7] aapt2 link 生成基础APK + R.java"
   --manifest "$DIR/AndroidManifest.xml" \
   --java "$OUT/gen" \
   --min-sdk-version 24 --target-sdk-version 34 \
-  --version-code 2 --version-name "1.1" \
+  --version-code 3 --version-name "1.2" \
   --auto-add-overlay \
   "$OUT/res.zip"
 
 echo "[3/7] javac 编译 Java 源码"
 find "$DIR/src" "$OUT/gen" -name "*.java" > "$OUT/sources.txt"
+# 注意：不用 -bootclasspath 指向 android.jar（其中的 java.* 是残缺 stub，
+# 会生成异常属性导致 build-tools 34 的 d8 NPE 崩溃）。android.jar 仅作 -classpath，
+# java.* 平台类由 JDK 提供，android.* 类从 android.jar 解析。
 javac -source 8 -target 8 -nowarn -encoding UTF-8 \
-  -bootclasspath "$AJAR" -classpath "$AJAR" \
+  -classpath "$AJAR" \
   -d "$OUT/classes" @"$OUT/sources.txt" 2> "$OUT/javac_warn.txt" || { cat "$OUT/javac_warn.txt"; exit 1; }
 grep -v "warning" "$OUT/javac_warn.txt" || true
 
+echo "[3.5/7] 剥离 MethodParameters（JDK21 javac 匿名类 name_index=0 会令 d8 NPE）"
+python3 "$DIR/strip-methodparams.py" "$OUT/classes"
+
 echo "[4/7] d8 转换为 dex"
-(cd "$OUT/classes" && find . -name '*.class' -print0 | xargs -0 /home/z/android-tools/android-15/d8 --release --lib "$AJAR" --min-api 24 --output "$OUT")
+(cd "$OUT/classes" && find . -name '*.class' -print0 | xargs -0 "$BT/d8" --release --lib "$AJAR" --min-api 24 --output "$OUT")
 
 echo "[5/7] 打包 classes.dex 进 APK"
 (cd "$OUT" && zip -q -j base.apk classes.dex)

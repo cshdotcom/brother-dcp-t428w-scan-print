@@ -270,7 +270,7 @@ export function Review({ taskId }: { taskId: string }) {
         <div className="ml-auto flex items-center gap-3">
           <div className="rounded-lg bg-slate-900 px-3 py-1.5 text-white shadow-md">
             <div className="text-[10px] opacity-70">得分</div>
-            <div className="fx-text-shimmer fx-on-dark !my-0 !text-lg !font-bold !leading-none">
+            <div className="!my-0 !text-lg !font-bold !leading-none text-white">
               {task.totalGet}
               <span className="text-xs font-normal opacity-70"> / {task.totalFull}</span>
             </div>
