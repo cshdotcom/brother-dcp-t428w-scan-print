@@ -1,0 +1,257 @@
+name: Build All Bridges (Android / Windows / Linux)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'android-bridge/**'
+      - 'mini-services/brother-bridge/**'
+      - '.github/workflows/bridges.yml'
+  workflow_dispatch:
+
+jobs:
+  build-android-bridge:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
+
+      - name: Find Android tools
+        id: find-tools
+        run: |
+          ANDROID_HOME=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}
+          BT="$ANDROID_HOME/build-tools/34.0.0"
+          AJAR="$ANDROID_HOME/platforms/android-34/android.jar"
+          echo "bt=$BT" >> $GITHUB_OUTPUT
+          echo "android_jar=$AJAR" >> $GITHUB_OUTPUT
+          ls -la "$BT/aapt2" "$BT/d8" "$BT/zipalign" "$BT/apksigner" "$AJAR"
+
+      - name: Generate debug keystore
+        run: |
+          keytool -genkey -v \
+            -keystore android-bridge/papermarker.keystore \
+            -alias papermarker \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass papermarker2024 \
+            -keypass papermarker2024 \
+            -dname "CN=PaperMarker, OU=Dev, O=PaperMarker, L=City, ST=State, C=CN"
+
+      - name: Build Android Bridge APK (v2.0.1 PWGRASTER + PNA)
+        run: |
+          cd android-bridge
+          BT="${{ steps.find-tools.outputs.bt }}"
+          AJAR="${{ steps.find-tools.outputs.android_jar }}"
+          OUT=build
+          rm -rf "$OUT"
+          mkdir -p "$OUT/classes" "$OUT/gen" "$OUT/res-compiled"
+
+          echo "[1/7] 准备资源文件"
+          mkdir -p "$OUT/res/values"
+          cat > "$OUT/res/values/strings.xml" << 'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">PaperMarker 桥接</string>
+          </resources>
+          XML
+          cat > "$OUT/res/values/styles.xml" << 'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="AppTheme" parent="@android:style/Theme.DeviceDefault.Light.NoActionBar"></style>
+          </resources>
+          XML
+
+          echo "[2/7] aapt2 compile 资源"
+          "$BT/aapt2" compile --dir "$OUT/res" -o "$OUT/res-compiled/res.zip"
+
+          echo "[3/7] aapt2 link 生成 R.java + base.apk"
+          "$BT/aapt2" link -o "$OUT/base.apk" -I "$AJAR" \
+            --manifest AndroidManifest.xml \
+            --java "$OUT/gen" \
+            --min-sdk-version 26 --target-sdk-version 34 \
+            --version-code 21 --version-name "2.0.1" \
+            --auto-add-overlay \
+            "$OUT/res-compiled/res.zip"
+
+          echo "[4/7] javac 编译 Java"
+          find src "$OUT/gen" -name "*.java" > "$OUT/sources.txt"
+          javac -source 11 -target 11 -nowarn -encoding UTF-8 \
+            -classpath "$AJAR" \
+            -d "$OUT/classes" @"$OUT/sources.txt"
+
+          echo "[5/7] d8 打包 dex"
+          "$BT/d8" --lib "$AJAR" --min-api 26 --output "$OUT" \
+            $(find "$OUT/classes" -name "*.class")
+
+          echo "[6/7] 合并 classes.dex 进 APK"
+          cp "$OUT/base.apk" "$OUT/unsigned.apk"
+          (cd "$OUT" && zip -j unsigned.apk classes.dex)
+
+          echo "[7/7] zipalign + 签名"
+          "$BT/zipalign" -f 4 "$OUT/unsigned.apk" PaperMarker-Bridge.apk
+          "$BT/apksigner" sign \
+            --ks papermarker.keystore \
+            --ks-key-alias papermarker \
+            --ks-pass pass:papermarker2024 \
+            --key-pass pass:papermarker2024 \
+            PaperMarker-Bridge.apk
+
+          echo "=== 构建完成 ==="
+          ls -lh PaperMarker-Bridge.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PaperMarker-Bridge-APK
+          path: android-bridge/PaperMarker-Bridge.apk
+          retention-days: 90
+
+  build-desktop-bridges:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install bridge deps (jpeg-js)
+        run: |
+          cd mini-services/brother-bridge && bun install
+
+      - name: Build Windows bridge .exe (v2 PWGRASTER + PNA 修复版)
+        run: |
+          mkdir -p dist
+          bun build mini-services/brother-bridge/standalone.ts \
+            --compile --target=bun-windows-x64 \
+            --outfile dist/papermarker-bridge.exe
+          ls -lh dist/
+
+      - name: Build Linux bridge (x64)
+        run: |
+          bun build mini-services/brother-bridge/standalone.ts \
+            --compile --target=bun-linux-x64 \
+            --outfile dist/papermarker-bridge-linux
+          chmod +x dist/papermarker-bridge-linux
+          ls -lh dist/
+
+      - name: Smoke test Linux bridge (PNA header)
+        run: |
+          (./dist/papermarker-bridge-linux > /tmp/bridge.log 2>&1 &) 
+          sleep 2
+          echo "--- /ping headers ---"
+          curl -s -D- -o /dev/null http://127.0.0.1:3790/ping | grep -i "private-network" || { echo "PNA header missing!"; cat /tmp/bridge.log; exit 1; }
+          echo "--- OPTIONS preflight ---"
+          curl -s -D- -o /dev/null -X OPTIONS http://127.0.0.1:3790/print | grep -i "private-network" || { echo "PNA header missing on preflight!"; exit 1; }
+          echo "✓ PNA headers OK"
+          pkill -f papermarker-bridge-linux || true
+
+      - name: Upload desktop bridges artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PaperMarker-Desktop-Bridges
+          path: |
+            dist/papermarker-bridge.exe
+            dist/papermarker-bridge-linux
+          retention-days: 90
+
+  upload-to-release:
+    needs: [build-android-bridge, build-desktop-bridges]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect binaries
+        run: |
+          mkdir -p release
+          find artifacts -name "*.apk" -exec cp {} release/ \;
+          find artifacts -name "*.exe" -exec cp {} release/ \;
+          find artifacts -name "*linux*" -exec cp {} release/ \;
+          chmod +x release/papermarker-bridge-linux 2>/dev/null || true
+          # 附带使用说明
+          cat > release/README-bridges.txt << 'EOF'
+          PaperMarker Brother 桥接服务 v2.0.1（PWGRASTER + PNA 修复版）
+
+          本版本修复：
+          1. 【关键】Private Network Access：HTTPS 网页访问 http://localhost:3790 不再被
+             Chrome/Edge（安卓/桌面）拦截 —— 此前"根本没有向打印机发送任何字节"的根因之一。
+          2. 【关键·安卓】HTTP 请求体解析改字节级读取，修复大体积打印请求（几百 KB base64）
+             被 BufferedReader 预读吞字节导致 JSON 损坏的致命 bug。
+          3. 【关键·打印协议】改 PWGRASTER 光栅协议（官方 brdcpt230filter 逆向）：
+             JPEG→A4@300dpi 光栅 + RLE 行压缩 + 完整 Brother PJL 参数头；
+             旧版裸 JPEG（ENTER LANGUAGE=JPEG）会被固件静默丢弃。
+             v2.0.1：新增黑白（Mono/GRAYSCALE）省墨选项，全链路生效。
+          4. 扫描 -NG 401 会话被占用 → ESC R 复位自动重试；收尾断连时回收完整 JPEG 页。
+
+          使用方法：
+          - Windows：双击 papermarker-bridge.exe，保持窗口开启
+          - Linux：chmod +x papermarker-bridge-linux && ./papermarker-bridge-linux
+          - Android：安装 PaperMarker-Bridge.apk → 打开 → 点「启动桥接服务」
+
+          之后浏览器打开 PaperMarker 网页 → 设置 → 打印机配置 → Brother 模式 → 填打印机 IP。
+          网页会自动探测 localhost:3790，经桥接直连打印机（TCP 9100 打印 / 54921 扫描）。
+          全程本地通信，不经云端。
+          EOF
+          ls -lh release/
+
+      - name: Upload to GitHub Release (latest)
+        run: |
+          # 获取最新 release，无则创建 v2.0.0-bridges
+          LATEST=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/latest")
+          RELEASE_ID=$(echo "$LATEST" | python3 -c "import sys,json;print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+          if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" = "" ]; then
+            echo "No release found, creating v2.0.0-bridges"
+            RESP=$(curl -s -X POST -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -d '{"tag_name":"v2.0.0-bridges","name":"PaperMarker Bridge v2.0.0（PNA 修复版）","body":"修复安卓/Windows 无法打印扫描：PNA 私网访问头 + 安卓 HTTP 体解析 + 官方 PJL 参数族打印 + ESC R 会话复位","draft":false,"prerelease":false}' \
+              "https://api.github.com/repos/${{ github.repository }}/releases")
+            RELEASE_ID=$(echo "$RESP" | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
+          fi
+          echo "Release ID: $RELEASE_ID"
+          # 逐个上传（同名 asset 先删）
+          for f in release/*; do
+            name=$(basename "$f")
+            ASSETS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets")
+            for id in $(echo "$ASSETS" | python3 -c "import sys,json;d=json.load(sys.stdin);[print(a['id']) for a in d if a['name']=='$name']" 2>/dev/null); do
+              curl -s -X DELETE -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                "https://api.github.com/repos/${{ github.repository }}/releases/assets/$id"
+              echo "Deleted old asset $id ($name)"
+            done
+            CT="application/octet-stream"
+            case "$name" in
+              *.apk) CT="application/vnd.android.package-archive";;
+              *.exe) CT="application/vnd.microsoft.portable-executable";;
+              *.txt) CT="text/plain";;
+            esac
+            curl -s -X POST \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Content-Type: $CT" \
+              --data-binary @"$f" \
+              "https://uploads.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets?name=$name"
+            echo "Uploaded $name"
+          done
+          echo ""
+          echo "Upload complete"
