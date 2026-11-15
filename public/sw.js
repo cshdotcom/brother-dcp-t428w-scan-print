@@ -9,7 +9,7 @@
  * 注意：本 SW 不缓存 API 响应（API 需实时联网）。
  */
 
-const CACHE = 'papermarker-v2'
+const CACHE = 'papermarker-v3'
 const CORE_ASSETS = ['/', '/icon-192.png', '/icon-512.png', '/manifest.webmanifest']
 
 // 安装：预缓存核心资源
@@ -56,12 +56,15 @@ self.addEventListener('fetch', (event) => {
   }
 
   // 导航请求：网络优先，失败回退缓存（离线可打开）
+  // v3：仅缓存成功响应（res.ok），避免把网关/重启期间的 5xx 错误页固化进缓存
   if (req.mode === 'navigate') {
     event.respondWith(
       fetch(req)
         .then((res) => {
-          const copy = res.clone()
-          caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {})
+          if (res.ok) {
+            const copy = res.clone()
+            caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {})
+          }
           return res
         })
         .catch(() => caches.match(req).then((r) => r || caches.match('/')))
@@ -69,7 +72,7 @@ self.addEventListener('fetch', (event) => {
     return
   }
 
-  // 静态资源：缓存优先
+  // 静态资源：缓存优先（同样只回写成功响应）
   event.respondWith(
     caches.match(req).then(
       (cached) =>

@@ -35,7 +35,7 @@ echo "[2/6] aapt2 compile 资源 → link 生成 R.java + base.apk"
   --manifest "$DIR/AndroidManifest.xml" \
   --java "$OUT/gen" \
   --min-sdk-version 26 --target-sdk-version 34 \
-  --version-code 21 --version-name "2.0.1" \
+  --version-code 22 --version-name "2.0.2" \
   --auto-add-overlay \
   "$OUT/res.zip"
 

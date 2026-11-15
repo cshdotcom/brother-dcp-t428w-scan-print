@@ -1,13 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.papermarker.bridge"
-    android:versionCode="21"
-    android:versionName="2.0.1">
+    android:versionCode="22"
+    android:versionName="2.0.2">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Android 14 (API 34) 起：targetSdk 34 + dataSync 前台服务必须声明此权限，
+         缺失会在 startForeground 时抛 SecurityException → 应用闪退（v2.0.2 修复） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Android 13+ 通知运行时权限（不影响服务运行，仅影响通知可见） -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:label="@string/app_name"

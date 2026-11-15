@@ -240,18 +240,30 @@ public class BridgeService extends Service {
     }
 
     void startForeground() {
-        NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-        if (Build.VERSION.SDK_INT >= 26) {
-            NotificationChannel ch = new NotificationChannel("bridge", "桥接服务", NotificationManager.IMPORTANCE_LOW);
-            nm.createNotificationChannel(ch);
+        // v2.0.2：防御式启动前台服务。
+        // Android 14 + targetSdk 34 的 dataSync 类型要求 FOREGROUND_SERVICE_DATA_SYNC 权限
+        // （已在 Manifest 声明）；即便个别 ROM 仍抛异常，这里捕获并退化为后台线程运行，
+        // 避免 SecurityException 直接闪退。若 5 秒内未能进入前台状态则 stopSelf 免遭系统强杀。
+        try {
+            NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            if (Build.VERSION.SDK_INT >= 26) {
+                NotificationChannel ch = new NotificationChannel("bridge", "桥接服务", NotificationManager.IMPORTANCE_LOW);
+                nm.createNotificationChannel(ch);
+            }
+            Notification notif = new Notification.Builder(this, "bridge")
+                .setContentTitle("PaperMarker 桥接运行中")
+                .setContentText("localhost:3790 · 浏览器经桥接连 Brother 打印机")
+                .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+                .setOngoing(true)
+                .build();
+            startForeground(NOTIF_ID, notif);
+        } catch (Throwable e) {
+            Log.e(TAG, "startForeground 失败，退化为后台运行: " + e);
+            // startForegroundService 启动的服务 5 秒内必须进入前台，否则系统抛
+            // RemoteServiceException；主动 stopSelf 后 onStartCommand 仍会重启（START_STICKY 语义
+            // 下系统会再次拉起，且由 MainActivity 前台点击触发时通常不受后台启动限制）。
+            try { stopSelf(); } catch (Throwable ignore) {}
         }
-        Notification notif = new Notification.Builder(this, "bridge")
-            .setContentTitle("PaperMarker 桥接运行中")
-            .setContentText("localhost:3790 · 浏览器经桥接连 Brother 打印机")
-            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
-            .setOngoing(true)
-            .build();
-        startForeground(NOTIF_ID, notif);
     }
 
     @Override
