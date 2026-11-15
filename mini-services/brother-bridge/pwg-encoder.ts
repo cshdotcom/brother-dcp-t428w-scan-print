@@ -28,7 +28,7 @@ function be32(h: Buffer, offset: number, v: number) {
   h[offset + 3] = v & 0xff
 }
 
-function buildPreamble(jobName: string, mono: boolean): Buffer {
+function buildPreamble(jobName: string, mono: boolean, duplex = false): Buffer {
   const name = (jobName || 'PaperMarker').replace(/["\\\r\n]/g, ' ').slice(0, 60)
   const driver =
     'I000403611' +
@@ -48,7 +48,9 @@ function buildPreamble(jobName: string, mono: boolean): Buffer {
     '@PJL SET JTRIGHTMARGIN=300',
     `@PJL SET RENDERMODE=${mono ? 'GRAYSCALE' : 'COLOR'}`,
     '@PJL SET PRINTQUALITY=NORMAL',
-    '@PJL SET DUPLEX=OFF',
+    // v2.0.3：自动双面（长边翻转，适合纵向试卷）；不支持双面的固件会忽略
+    `@PJL SET DUPLEX=${duplex ? 'ON' : 'OFF'}`,
+    ...(duplex ? ['@PJL SET BINDING=LONGEDGE'] : []),
     '@PJL SET MEDIATYPE=REGULAR',
     '@PJL SET MANUALFEED=OFF',
     '@PJL SET SOURCETRAY=AUTO',
@@ -181,10 +183,15 @@ export function jpegToA4Page(jpegBuf: Buffer): RasterPage {
   return scaleToA4(Buffer.from(decoded.data), decoded.width, decoded.height)
 }
 
-/** 组装完整打印流（多页；份数由前端重复 jpegs 实现，这里每页一次；mono=true 黑白省墨） */
-export function assemblePrintStream(pages: RasterPage[], jobName: string, mono = false): Buffer {
+/** 组装完整打印流（多页；份数由前端重复 jpegs 实现，这里每页一次；mono 黑白省墨；duplex 自动双面） */
+export function assemblePrintStream(
+  pages: RasterPage[],
+  jobName: string,
+  mono = false,
+  duplex = false
+): Buffer {
   const parts: Buffer[] = []
-  parts.push(buildPreamble(jobName, mono))
+  parts.push(buildPreamble(jobName, mono, duplex))
   parts.push(Buffer.from('RaS2', 'ascii'))
   for (const pg of pages) {
     parts.push(encodePage(pg, A4_DPI, mono))

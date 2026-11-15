@@ -58,7 +58,7 @@ async function handleRequest(req: Request): Promise<Response> {
 
   // ---------- 健康检查 ----------
   if (path === '/ping' && method === 'GET') {
-    return json({ ok: true, service: 'brother-bridge', version: '2.0.1', port: PORT })
+    return json({ ok: true, service: 'brother-bridge', version: '2.0.3', port: PORT })
   }
 
   // ---------- Brother 扫描 ----------
@@ -101,14 +101,28 @@ async function handleRequest(req: Request): Promise<Response> {
     try {
       const buffers = jpegs.map((b: string) => Buffer.from(b, 'base64'))
       const mono = body.mono === true || body.colorMode === 'gray' || body.colorMode === 'mono'
+      const duplex = body.duplex === true // v2.0.3：自动双面（打印机支持时生效）
       // 1. 光栅化：JPEG → A4 @300dpi RGB → PWG Raster 打印流（mono=灰度省墨）
       const pages = buffers.map((b: Buffer) => jpegToA4Page(b))
-      const stream = assemblePrintStream(pages, body.jobName || 'PaperMarker', mono)
+      const stream = assemblePrintStream(pages, body.jobName || 'PaperMarker', mono, duplex)
       // 2. 直连 9100 发送
       const r = await brotherSendStream(host, stream)
       return json(r, r.ok ? 200 : 500)
     } catch (e: any) {
       return json({ ok: false, msg: `桥接打印异常：${e?.message || e}` }, 500)
+    }
+  }
+
+  // ---------- 打印机能力探测（v2.0.3：PJL INFO CONFIG，查双面等） ----------
+  if (path === '/probe/capabilities' && method === 'POST') {
+    const body = await req.json().catch(() => ({}))
+    const host = String(body.host || '').trim()
+    if (!host) return json({ ok: false, msg: '缺少 host 参数' }, 400)
+    try {
+      const r = await probePrinterCapabilities(host)
+      return json(r, r.ok ? 200 : 500)
+    } catch (e: any) {
+      return json({ ok: false, msg: `探测异常：${e?.message || e}` }, 500)
     }
   }
 
@@ -195,6 +209,95 @@ async function brotherSendStream(
   }
 }
 
+/** PJL INFO CONFIG 查询打印机能力（是否支持自动双面等，v2.0.3） */
+async function probePrinterCapabilities(host: string): Promise<{
+  ok: boolean
+  msg: string
+  duplex?: boolean
+  trace?: string[]
+}> {
+  const { Socket } = await import('net')
+  let sock: any = null
+  try {
+    sock = new Socket()
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        sock?.destroy()
+        reject(new Error(`连接 ${host}:9100 超时`))
+      }, 5000)
+      sock.once('connect', () => {
+        clearTimeout(timer)
+        resolve()
+      })
+      sock.once('error', (e: Error) => {
+        clearTimeout(timer)
+        reject(e)
+      })
+      sock.connect(9100, host)
+    })
+
+    const UEL_LOCAL = Buffer.from([0x1b, 0x25, 0x2d, 0x31, 0x32, 0x33, 0x34, 0x35, 0x58])
+    sock.write(Buffer.concat([
+      UEL_LOCAL,
+      Buffer.from('@PJL\r\n@PJL INFO CONFIG\r\n', 'ascii'),
+      UEL_LOCAL,
+    ]))
+
+    // 读响应：空闲 5s 止，上限 16KB
+    const chunks: Buffer[] = []
+    let total = 0
+    let lastActivity = Date.now()
+    await new Promise<void>((resolve) => {
+      sock.on('data', (d: Buffer) => {
+        chunks.push(d)
+        total += d.length
+        lastActivity = Date.now()
+        if (total >= 16384) resolve()
+      })
+      sock.on('error', () => resolve())
+      sock.on('close', () => resolve())
+      const poll = setInterval(() => {
+        if (Date.now() - lastActivity > 5000 || total >= 16384) {
+          clearInterval(poll)
+          resolve()
+        }
+      }, 500)
+      setTimeout(() => {
+        clearInterval(poll)
+        resolve()
+      }, 15000)
+    })
+
+    const resp = Buffer.concat(chunks).toString('ascii')
+    const trace: string[] = [`INFO CONFIG 响应 ${total}B`]
+    let duplex = false
+    let duplexSeen = false
+    for (const raw of resp.split(/\r?\n/)) {
+      const line = raw.trim()
+      if (!/DUPLEX/i.test(line)) continue
+      duplexSeen = true
+      const eq = line.indexOf('=')
+      const v = eq >= 0 ? line.slice(eq + 1).trim().toUpperCase() : ''
+      if (['ON', 'YES', '1', 'TRUE', 'AVAILABLE'].includes(v)) duplex = true
+      trace.push(`能力行: ${line}`)
+    }
+    return {
+      ok: true,
+      duplex: duplexSeen ? duplex : false,
+      msg: duplexSeen
+        ? duplex
+          ? '打印机支持自动双面（DUPLEX 可用）'
+          : '打印机不支持自动双面（需手动翻纸双面）'
+        : '已读取打印机配置（未报告 DUPLEX 字段，按不支持处理）',
+      trace,
+    }
+  } catch (e: any) {
+    return { ok: false, msg: `能力探测失败：${e?.message || e}` }
+  } finally {
+    try { sock?.destroy() } catch {}
+  }
+}
+
 // ---------- 启动 ----------
 console.log('╔══════════════════════════════════════════════════════════╗')
 console.log('║  PaperMarker Brother 本地桥接服务                        ║')
@@ -202,7 +305,8 @@ console.log('╠═════════════════════�
 console.log(`║  监听地址：http://localhost:${PORT}                        ║`)
 console.log('║  健康检查：GET  /ping                                    ║')
 console.log('║  扫描：    POST /scan                                    ║')
-console.log('║  打印：    POST /print                                   ║')
+console.log('║  打印：    POST /print（支持 duplex 双面）               ║')
+console.log('║  能力探测：POST /probe/capabilities（双面支持等）        ║')
 console.log('║  探测扫描：POST /probe/scan                              ║')
 console.log('║  探测打印：POST /probe/print                             ║')
 console.log('╠══════════════════════════════════════════════════════════╣')

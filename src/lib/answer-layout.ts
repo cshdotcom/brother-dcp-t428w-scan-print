@@ -78,11 +78,11 @@ export interface BlankMark {
   box: BackfillBox
 }
 
-// ---------- 尺寸常量（相对页面比例，v3 更小更安全） ----------
-/** 题级标记最大边长（相对页宽） */
-export const MARK_SIZE_Q = 0.02
-/** 每空标记边长（相对页宽）—— 更小 */
-export const MARK_SIZE_BLANK = 0.014
+// ---------- 尺寸常量（相对页面比例，v4 更小更安全） ----------
+/** 题级标记最大边长（相对页宽）v4：0.02 → 0.016（用户反馈「打小一点」） */
+export const MARK_SIZE_Q = 0.016
+/** 每空标记边长（相对页宽）v4：0.014 → 0.011 */
+export const MARK_SIZE_BLANK = 0.011
 /** 答案文字行高（相对页高） */
 const ANSWER_H = 0.021
 /** 解析文字行高（相对页高） */

@@ -56,6 +56,8 @@ export interface MarkLayers {
   boxes: boolean
   /** 顶部宽分数条（练习名/姓名得分/打印日期） */
   banner: boolean
+  /** 标记符号缩放（0.5–1.6，1=标准；纯标记层套印时建议调小） */
+  markScale?: number
 }
 
 export const DEFAULT_MARK_LAYERS: MarkLayers = {
@@ -66,6 +68,7 @@ export const DEFAULT_MARK_LAYERS: MarkLayers = {
   solution: false,
   boxes: true,
   banner: true,
+  markScale: 1,
 }
 
 /** 打印默认方案（保存到用户配置，可一键打印） */
@@ -74,6 +77,13 @@ export interface PrintDefaults {
   content?: 'mark' | 'marks' | 'answer' | 'parse'
   copies?: number
   duplex?: boolean
+  /**
+   * 打印确认策略（v2.0.3）：
+   *  - 'auto'：一键打印不弹框直接打
+   *  - 'multi'：仅多页/多份/双面时弹框确认（默认）
+   *  - 'ask'：每次打印前都弹框确认
+   */
+  confirmPolicy?: 'auto' | 'multi' | 'ask'
 }
 
 /** 自定义 AI 源配置（OpenAI 兼容接口） */
@@ -93,6 +103,7 @@ export const DEFAULT_PRINT_DEFAULTS: PrintDefaults = {
   content: 'mark',
   copies: 1,
   duplex: false,
+  confirmPolicy: 'multi',
 }
 
 export function normalizePrintDefaults(raw: any): PrintDefaults {
@@ -102,6 +113,7 @@ export function normalizePrintDefaults(raw: any): PrintDefaults {
     if (['mark', 'marks', 'answer', 'parse'].includes(raw.content)) d.content = raw.content
     if (typeof raw.copies === 'number' && raw.copies >= 1 && raw.copies <= 20) d.copies = raw.copies
     if (typeof raw.duplex === 'boolean') d.duplex = raw.duplex
+    if (['auto', 'multi', 'ask'].includes(raw.confirmPolicy)) d.confirmPolicy = raw.confirmPolicy
   }
   return d
 }
@@ -111,6 +123,9 @@ export function normalizeLayers(raw: any): MarkLayers {
   if (raw && typeof raw === 'object') {
     for (const k of Object.keys(DEFAULT_MARK_LAYERS) as (keyof MarkLayers)[]) {
       if (typeof raw[k] === 'boolean') l[k] = raw[k]
+    }
+    if (typeof raw.markScale === 'number' && raw.markScale >= 0.5 && raw.markScale <= 1.6) {
+      l.markScale = raw.markScale
     }
   }
   return l

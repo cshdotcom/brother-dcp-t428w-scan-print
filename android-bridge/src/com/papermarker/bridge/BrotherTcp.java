@@ -61,18 +61,29 @@ public class BrotherTcp {
         out.flush();
     }
 
-    // ---------- 精确读取 N 字节 ----------
-    static byte[] readExact(InputStream in, int n, int timeoutMs) throws IOException {
+    // ---------- 精确读取 N 字节（v2.0.3：空闲超时语义） ----------
+    // 只要在 idleMs 内有字节到达就续期，数据持续流动就永不超时。
+    // 旧版绝对 deadline + socket soTimeout（连接超时值 4s）会把慢速流动的
+    // 大图（600dpi/彩色）从中间砍断，抛 SocketTimeoutException: Read timed out。
+    static byte[] readExact(InputStream in, int n, int idleMs) throws IOException {
         byte[] buf = new byte[n];
         int off = 0;
-        long deadline = System.currentTimeMillis() + timeoutMs;
+        long lastActivity = System.currentTimeMillis();
         while (off < n) {
-            int remaining = n - off;
-            int left = (int) (deadline - System.currentTimeMillis());
-            if (left <= 0) throw new IOException("读取超时");
-            int r = in.read(buf, off, remaining);
+            long left = lastActivity + idleMs - System.currentTimeMillis();
+            if (left <= 0) throw new IOException("读取超时（" + idleMs + "ms 无数据）");
+            int r;
+            try {
+                r = in.read(buf, off, n - off);
+            } catch (java.net.SocketTimeoutException ste) {
+                // 单次阻塞读超时 → 回到循环顶检查空闲 deadline（不中断慢速数据流）
+                continue;
+            }
             if (r < 0) throw new IOException("连接中断（设备拒绝或会话被占用）");
-            off += r;
+            if (r > 0) {
+                off += r;
+                lastActivity = System.currentTimeMillis();
+            }
         }
         return buf;
     }
@@ -101,6 +112,8 @@ public class BrotherTcp {
         public String msg;
         public List<byte[]> pages = new ArrayList<>();
         public List<String> trace = new ArrayList<>();
+        /** 打印机能力探测：是否支持自动双面（null = 未知） */
+        public Boolean duplex = null;
     }
 
     // ---------- Brother 扫描 ----------
@@ -172,7 +185,9 @@ public class BrotherTcp {
             result.trace.add("ESC X 已发送（" + d + "dpi " + mode + "）");
 
             boolean isColor = "C256".equals(mode) || "ERRDIF".equals(mode);
-            int chunkTimeout = isColor ? 90000 : 45000;
+            // v2.0.3：空闲超时下按数据量给宽松上限（600dpi/彩色给 120s）
+            boolean heavy = isColor || d > 300;
+            int chunkTimeout = heavy ? 120000 : 60000;
 
             ByteArrayOutputStream cur = new ByteArrayOutputStream();
             while (true) {
@@ -445,14 +460,18 @@ public class BrotherTcp {
 
     /** PJL 前导（UEL 起始，进入 PWGRASTER） */
     static byte[] buildPreamble(String jobName) {
-        return buildPreamble(jobName, false);
+        return buildPreamble(jobName, false, false);
     }
 
-    /** mono=true：RENDERMODE=GRAYSCALE（v2.0.1 黑白省墨） */
+    /** mono=true：RENDERMODE=GRAYSCALE */
     static byte[] buildPreamble(String jobName, boolean mono) {
+        return buildPreamble(jobName, mono, false);
+    }
+
+    /** v2.0.3：duplex=true 自动双面（BINDING=LONGEDGE 长边翻转，适合试卷纵向页） */
+    static byte[] buildPreamble(String jobName, boolean mono, boolean duplex) {
         String name = jobName == null ? "PaperMarker" : jobName.replaceAll("[\"\\\\\\r\\n]", " ");
         if (name.length() > 60) name = name.substring(0, 60);
-        // JOBSETTINGLOG DRIVER：I + 型号(7) + "11" + media/quality/paper/color/duplex/slot 各4位HEX
         String driver = mono ? "I0004036110000000100010009000100000007" : "I0004036110000000100020009000200000007";
         StringBuilder sb = new StringBuilder();
         sb.append("@PJL \n");
@@ -467,7 +486,8 @@ public class BrotherTcp {
         sb.append("@PJL SET JTRIGHTMARGIN=300\n");
         sb.append("@PJL SET RENDERMODE=").append(mono ? "GRAYSCALE" : "COLOR").append("\n");
         sb.append("@PJL SET PRINTQUALITY=NORMAL\n");
-        sb.append("@PJL SET DUPLEX=OFF\n");
+        sb.append("@PJL SET DUPLEX=").append(duplex ? "ON" : "OFF").append("\n");
+        if (duplex) sb.append("@PJL SET BINDING=LONGEDGE\n");
         sb.append("@PJL SET MEDIATYPE=REGULAR\n");
         sb.append("@PJL SET MANUALFEED=OFF\n");
         sb.append("@PJL SET SOURCETRAY=AUTO\n");
@@ -482,13 +502,18 @@ public class BrotherTcp {
     }
 
     // ---------- Brother 直连打印（PWGRASTER，v2.0.0） ----------
-    /** 兼容旧签名（彩色） */
+    /** 兼容旧签名（彩色单面） */
     public static ScanResult print(String host, List<byte[]> jpegs, String jobName) {
-        return print(host, jpegs, jobName, false);
+        return print(host, jpegs, jobName, false, false);
     }
 
-    /** mono=true 灰度省墨（RENDERMODE=GRAYSCALE，PWG 头 8bpp） */
+    /** mono=true 灰度省墨 */
     public static ScanResult print(String host, List<byte[]> jpegs, String jobName, boolean mono) {
+        return print(host, jpegs, jobName, mono, false);
+    }
+
+    /** v2.0.3：duplex=true 自动双面（需打印机支持，可先用 probeCapabilities 查询） */
+    public static ScanResult print(String host, List<byte[]> jpegs, String jobName, boolean mono, boolean duplex) {
         ScanResult result = new ScanResult();
         Socket sock = null;
         try {
@@ -496,14 +521,14 @@ public class BrotherTcp {
                 result.msg = "没有可打印的页面";
                 return result;
             }
-            result.trace.add("光栅化 " + jpegs.size() + " 页 → A4 " + A4_DPI + "dpi");
+            result.trace.add("光栅化 " + jpegs.size() + " 页 → A4 " + A4_DPI + "dpi" + (duplex ? "（双面）" : ""));
 
             sock = connect(host, PRINT_PORT, 8000);
             sock.setSendBufferSize(512 * 1024);
             OutputStream out = new BufferedOutputStream(sock.getOutputStream(), 256 * 1024);
 
-            // PJL 前导 + RaS2（整任务一次；mono=灰度省墨）
-            out.write(buildPreamble(jobName, mono));
+            // PJL 前导 + RaS2（整任务一次；mono=灰度省墨；duplex=自动双面）
+            out.write(buildPreamble(jobName, mono, duplex));
             out.write("RaS2".getBytes("ASCII"));
 
             // 每页：1796B 页头 + RLE 行块
@@ -523,7 +548,8 @@ public class BrotherTcp {
             out.flush();
             Thread.sleep(1500); // 给打印机接收缓冲处理时间
             result.ok = true;
-            result.msg = "已向 " + host + ":9100 下发 " + jpegs.size() + " 页打印任务（PWGRASTER 协议，" + (mono ? "Mono" : "Color") + "）";
+            result.msg = "已向 " + host + ":9100 下发 " + jpegs.size() + " 页打印任务（PWGRASTER 协议，"
+                + (mono ? "Mono" : "Color") + (duplex ? "，双面" : "，单面") + "）";
         } catch (Exception e) {
             result.msg = "Brother 直连打印失败：" + e.getMessage();
         } finally {
@@ -570,6 +596,71 @@ public class BrotherTcp {
             result.msg = "打印机 " + host + ":9100 端口可达";
         } catch (Exception e) {
             result.msg = "打印机 " + host + ":9100 连接失败：" + e.getMessage();
+        } finally {
+            try { if (sock != null) sock.close(); } catch (Exception e) {}
+        }
+        return result;
+    }
+
+    /**
+     * v2.0.3：PJL INFO CONFIG 查询打印机能力（自动双面等）。
+     * 发 UEL + @PJL INFO CONFIG + UEL，读响应（空闲 5s 止，上限 16KB），
+     * 解析 DUPLEX 字段：ON/YES/1/TRUE/AVAILABLE → 支持。
+     */
+    public static ScanResult probeCapabilities(String host) {
+        ScanResult result = new ScanResult();
+        Socket sock = null;
+        try {
+            sock = connect(host, PRINT_PORT, 4000);
+            sock.setSoTimeout(4000);
+            OutputStream out = sock.getOutputStream();
+            InputStream in = sock.getInputStream();
+            out.write(UEL);
+            out.write("@PJL\r\n@PJL INFO CONFIG\r\n".getBytes("ASCII"));
+            out.write(UEL);
+            out.flush();
+
+            ByteArrayOutputStream buf = new ByteArrayOutputStream();
+            long lastActivity = System.currentTimeMillis();
+            byte[] tmp = new byte[4096];
+            while (buf.size() < 16384) {
+                long left = lastActivity + 5000 - System.currentTimeMillis();
+                if (left <= 0) break;
+                int r;
+                try {
+                    r = in.read(tmp);
+                } catch (java.net.SocketTimeoutException ste) {
+                    continue;
+                }
+                if (r < 0) break;
+                if (r > 0) {
+                    buf.write(tmp, 0, r);
+                    lastActivity = System.currentTimeMillis();
+                }
+            }
+            String resp = buf.toString("ASCII");
+            result.trace.add("INFO CONFIG 响应 " + buf.size() + "B");
+            boolean duplex = false;
+            boolean duplexSeen = false;
+            for (String line : resp.split("\\r?\\n")) {
+                String l = line.trim();
+                if (!l.toUpperCase().contains("DUPLEX")) continue;
+                duplexSeen = true;
+                int eq = l.indexOf('=');
+                String v = eq >= 0 ? l.substring(eq + 1).trim() : "";
+                String uv = v.toUpperCase();
+                if (uv.equals("ON") || uv.equals("YES") || uv.equals("1")
+                        || uv.equals("TRUE") || uv.equals("AVAILABLE")) duplex = true;
+                result.trace.add("能力行: " + l);
+            }
+            result.ok = true;
+            result.duplex = duplexSeen ? duplex : Boolean.FALSE;
+            result.msg = duplexSeen
+                ? (duplex ? "打印机支持自动双面（DUPLEX 可用）" : "打印机不支持自动双面（手动翻纸双面）")
+                : "已读取打印机配置（未报告 DUPLEX 字段，按不支持处理）";
+        } catch (Exception e) {
+            result.ok = false;
+            result.msg = "能力探测失败：" + e.getMessage();
         } finally {
             try { if (sock != null) sock.close(); } catch (Exception e) {}
         }

@@ -39,11 +39,15 @@ function mm2px(mm: number, dpi: number): number {
   return Math.round((mm / 25.4) * dpi)
 }
 
-/** 带内部缓冲的 Socket 读取器 */
+/** 带内部缓冲的 Socket 读取器
+ *  v2.0.3：空闲超时语义 —— 只要在 timeoutMs 内有任意字节到达就续期，
+ *  数据持续流动就永不超时。旧版绝对 deadline 会把仍在慢速流动的大图
+ *  （600dpi/彩色）从中间砍断，报「读取超时」。 */
 class SocketReader {
   private buf: Buffer = Buffer.alloc(0)
   private waiters: Array<{
     n: number
+    idleMs: number
     resolve: (b: Buffer) => void
     reject: (e: Error) => void
     timer: Timer
@@ -59,7 +63,20 @@ class SocketReader {
 
   private push(d: Buffer) {
     this.buf = Buffer.concat([this.buf, d])
+    this.refreshTimers()
     this.drain()
+  }
+
+  /** 数据活动 → 给所有等待者续期（重新计时） */
+  private refreshTimers() {
+    for (const w of this.waiters) {
+      clearTimeout(w.timer)
+      w.timer = setTimeout(() => {
+        const i = this.waiters.indexOf(w)
+        if (i >= 0) this.waiters.splice(i, 1)
+        w.reject(new Error(`读取超时（${w.idleMs}ms 无数据）`))
+      }, w.idleMs)
+    }
   }
 
   private fail(e: Error) {
@@ -89,12 +106,14 @@ class SocketReader {
       return Promise.resolve(out)
     }
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const i = this.waiters.findIndex((w) => w.resolve === resolve)
-        if (i >= 0) this.waiters.splice(i, 1)
-        reject(new Error(`读取超时（${timeoutMs}ms）`))
-      }, timeoutMs)
-      this.waiters.push({ n, resolve, reject, timer })
+      const armTimer = () =>
+        setTimeout(() => {
+          const i = this.waiters.findIndex((w) => w.resolve === resolve)
+          if (i >= 0) this.waiters.splice(i, 1)
+          reject(new Error(`读取超时（${timeoutMs}ms 无数据）`))
+        }, timeoutMs)
+      const timer = armTimer()
+      this.waiters.push({ n, idleMs: timeoutMs, resolve, reject, timer })
       if (this.closed) {
         clearTimeout(timer)
         reject(this.closeErr || new Error('连接已关闭'))
@@ -243,9 +262,11 @@ export async function brotherScanPages(
     let cur: Buffer[] = []
     let curLen = 0
     let pageIndex = 0
-    // 彩色模式数据量大（3 倍灰度），超时给足
+    // v2.0.3：空闲超时语义下按数据量给宽松上限：彩色数据量×3、600dpi 又×4，
+    // 设备编码节奏慢（逐块吐出）但只要还在流就不超时
     const isColor = mode === 'C256' || mode === 'ERRDIF'
-    const CHUNK_TIMEOUT = isColor ? 90000 : 45000
+    const heavy = isColor || dpi > 300
+    const CHUNK_TIMEOUT = heavy ? 120000 : 60000
 
     while (true) {
       // 先读 1 字节块类型（协议：1 字节头，bit7=1 为控制头）

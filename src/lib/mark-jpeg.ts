@@ -101,15 +101,16 @@ function blankMarksSvg(a: any, outW: number, outH: number, layers: RenderLayers)
   for (const m of computeBlankMarks(blanks)) {
     const cx = m.cx * outW
     const cy = m.cy * outH
-    const size = m.size * outW
+    const size = m.size * outW * (layers.markScale || 1)
     const sw = Math.max(1.4, size * 0.14)
     const c = COLORS[m.judge] || COLORS.wrong
+    // v2.0.3 重制：partial = 勾 + 贯穿斜杠（旧版勾右上小叉不像半对半错）
     const paths =
       m.judge === 'correct'
         ? ['M4 12.5 L9.5 18 L20 6']
         : m.judge === 'wrong'
           ? ['M6 6 L18 18 M18 6 L6 18']
-          : ['M4 12.5 L9.5 18 L20 6', 'M9.2 1.2 L18.6 10.6 M18.6 1.2 L9.2 10.6']
+          : ['M4 12.5 L9.5 18 L20 6', 'M6 3 L18 21']
     const widths = m.judge === 'partial' ? [3, 2.6] : [3]
     paths.forEach((p, i) => {
       sv.push(
@@ -136,12 +137,13 @@ function blankMarksSvg(a: any, outW: number, outH: number, layers: RenderLayers)
   return sv
 }
 
-/** 生成判分标记的 SVG path（viewBox 24x24，与前端同款） */
+/** 生成判分标记的 SVG path（viewBox 24x24，与前端同款）
+ *  v2.0.3：partial = 勾 + 贯穿斜杠（左上→右下穿过两臂） */
 function judgeMarkPath(type: string): { paths: string[]; widths: number[] } {
   if (type === 'correct') return { paths: ['M4 12.5 L9.5 18 L20 6'], widths: [3] }
   if (type === 'wrong') return { paths: ['M6 6 L18 18 M18 6 L6 18'], widths: [3] }
   return {
-    paths: ['M4 12.5 L9.5 18 L20 6', 'M9.2 1.2 L18.6 10.6 M18.6 1.2 L9.2 10.6'],
+    paths: ['M4 12.5 L9.5 18 L20 6', 'M6 3 L18 21'],
     widths: [3, 2.6],
   }
 }
@@ -278,12 +280,12 @@ export async function renderAnnotatedJpegs(
         )
       }
 
-      // 题级判分标记（题号旁，v3 小号）
+      // 题级判分标记（题号旁，v3 小号；markScale 可再缩放）
       if (layers.marks) {
         const mp = questionMarkPos({ x: a.roiX || 0, y: a.roiY || 0, w: a.roiW || 0, h: a.roiH || 0 })
         const mx = mp.cx * outW
         const my = mp.cy * outH
-        const markSize = Math.max(12, mp.size * outW)
+        const markSize = Math.max(12, mp.size * outW * (layers.markScale || 1))
         const { paths, widths } = judgeMarkPath(a.judgeType)
         const c = COLORS[a.judgeType] || COLORS.wrong
         paths.forEach((p, i) => {

@@ -1,11 +1,12 @@
 'use client'
 
 /**
- * 判分矢量图标（√ / × / 半勾⍻）：
+ * 判分矢量图标（√ / × / 半对）：
  * 三端（复核界面、叠加层、PDF、Brother JPEG）统一画法 ——
  *   correct: 绿色完整勾
  *   wrong:   红色叉
- *   partial: ⍻ —— 一个完整的勾 + 勾的中上部叠一个小叉（矢量 SVG，非字符）
+ *   partial: 勾 + 贯穿斜杠（v2.0.3 重制：旧版勾上部小叉不像半对半错；
+ *            新版勾被一斜杠划过，与全对/全错一眼区分，老师批改习惯符号）
  */
 
 export const JUDGE_COLOR: Record<string, string> = {
@@ -71,7 +72,7 @@ export function JudgeMarkIcon({
     )
   }
 
-  // 半对 ⍻：完整勾 + 中上部小叉
+  // 半对：完整勾 + 贯穿斜杠（左上→右下，穿过勾的两臂）
   return (
     <svg
       width={size}
@@ -89,7 +90,7 @@ export function JudgeMarkIcon({
         strokeLinejoin="round"
       />
       <path
-        d="M8.6 2.8 L15.4 9.6 M15.4 2.8 L8.6 9.6"
+        d="M6 3 L18 21"
         stroke={c}
         strokeWidth={sw * 0.85}
         strokeLinecap="round"

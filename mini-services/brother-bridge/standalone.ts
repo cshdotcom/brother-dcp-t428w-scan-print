@@ -68,6 +68,7 @@ class SocketReader {
   private buf: Buffer = Buffer.alloc(0)
   private waiters: Array<{
     n: number
+    idleMs: number
     resolve: (b: Buffer) => void
     reject: (e: Error) => void
     timer: Timer
@@ -83,7 +84,22 @@ class SocketReader {
 
   private push(d: Buffer) {
     this.buf = Buffer.concat([this.buf, d])
+    this.refreshTimers()
     this.drain()
+  }
+
+  /** v2.0.3 空闲超时语义：只要有字节到达就给所有等待者续期；
+   *  数据持续流动就永不超时。旧版绝对 deadline 会把仍在慢速流动的
+   *  大图（600dpi/彩色）从中间砍断，报「读取超时 / Read timed out」。 */
+  private refreshTimers() {
+    for (const w of this.waiters) {
+      clearTimeout(w.timer)
+      w.timer = setTimeout(() => {
+        const i = this.waiters.indexOf(w)
+        if (i >= 0) this.waiters.splice(i, 1)
+        w.reject(new Error(`读取超时（${w.idleMs}ms 无数据）`))
+      }, w.idleMs)
+    }
   }
 
   private fail(e: Error) {
@@ -114,12 +130,14 @@ class SocketReader {
       return Promise.resolve(out)
     }
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const i = this.waiters.findIndex((w) => w.resolve === resolve)
-        if (i >= 0) this.waiters.splice(i, 1)
-        reject(new Error(`读取超时（${timeoutMs}ms）`))
-      }, timeoutMs)
-      this.waiters.push({ n, resolve, reject, timer })
+      const armTimer = () =>
+        setTimeout(() => {
+          const i = this.waiters.findIndex((w) => w.resolve === resolve)
+          if (i >= 0) this.waiters.splice(i, 1)
+          reject(new Error(`读取超时（${timeoutMs}ms 无数据）`))
+        }, timeoutMs)
+      const timer = armTimer()
+      this.waiters.push({ n, idleMs: timeoutMs, resolve, reject, timer })
       if (this.closed) {
         clearTimeout(timer)
         reject(this.closeErr || new Error('连接已关闭'))
@@ -238,9 +256,11 @@ async function brotherScanPages(
     let cur: Buffer[] = []
     let curLen = 0
     let pageIndex = 0
-    // 彩色模式数据量大（3 倍灰度），超时给足（v2：收尾断连时回收完整 JPEG）
+    // v2.0.3：空闲超时语义下按数据量给宽松上限（600dpi/彩色给 120s）；
+    // 设备编码节奏慢（逐块吐出）但只要还在流就不超时
     const isColor = mode === 'C256' || mode === 'ERRDIF'
-    const CHUNK_TIMEOUT = isColor ? 90000 : 45000
+    const heavy = isColor || dpi > 300
+    const CHUNK_TIMEOUT = heavy ? 120000 : 60000
 
     while (true) {
       // 先读 1 字节块类型（协议：1 字节头，bit7=1 为控制头）
@@ -353,14 +373,16 @@ async function brotherPrintJpegs(
   host: string,
   jpegs: Buffer[],
   jobName = 'PaperMarker',
+  mono = false,
+  duplex = false,
   timeoutMs = 120000
 ): Promise<{ ok: boolean; msg: string }> {
   if (jpegs.length === 0) return { ok: false, msg: '没有可打印的页面' }
   let sock: Socket | null = null
   try {
-    // 1. 光栅化：JPEG → A4 @300dpi RGB → PWG Raster 打印流（mono=灰度省墨）
+    // 1. 光栅化：JPEG → A4 @300dpi RGB → PWG Raster 打印流（mono=灰度省墨；duplex=自动双面 v2.0.3）
     const pages = jpegs.map((j) => jpegToA4Page(j))
-    const stream = assemblePrintStream(pages, jobName, mono)
+    const stream = assemblePrintStream(pages, jobName, mono, duplex)
 
     // 2. 直连 9100 发送
     sock = await connect(host, PRINT_PORT, 5000)
@@ -374,7 +396,7 @@ async function brotherPrintJpegs(
       sock!.once('error', () => { clearTimeout(t); resolve() })
       sock!.end(() => { clearTimeout(t); resolve() })
     })
-    return { ok: true, msg: `已向 ${host}:9100 下发 ${jpegs.length} 页打印任务（PWGRASTER ${Math.round(stream.length / 1024)}KB，${mono ? 'Mono' : 'Color'}）` }
+    return { ok: true, msg: `已向 ${host}:9100 下发 ${jpegs.length} 页打印任务（PWGRASTER ${Math.round(stream.length / 1024)}KB，${mono ? 'Mono' : 'Color'}${duplex ? '，双面' : '，单面'}）` }
   } catch (e: any) {
     return { ok: false, msg: `Brother 直连打印失败：${e?.message || e}` }
   } finally {
@@ -418,6 +440,77 @@ async function probePrinter(host: string): Promise<{ ok: boolean; msg: string }>
   }
 }
 
+/** v2.0.3：PJL INFO CONFIG 查询打印机能力（是否支持自动双面等） */
+async function probePrinterCapabilities(host: string): Promise<{
+  ok: boolean
+  msg: string
+  duplex?: boolean
+  trace?: string[]
+}> {
+  let sock: Socket | null = null
+  try {
+    sock = await connect(host, PRINT_PORT, 5000)
+    sock.write(Buffer.concat([
+      UEL,
+      Buffer.from('@PJL\r\n@PJL INFO CONFIG\r\n', 'ascii'),
+      UEL,
+    ]))
+
+    // 读响应：空闲 5s 止，上限 16KB
+    const chunks: Buffer[] = []
+    let total = 0
+    let lastActivity = Date.now()
+    await new Promise<void>((resolve) => {
+      sock!.on('data', (d: Buffer) => {
+        chunks.push(d)
+        total += d.length
+        lastActivity = Date.now()
+        if (total >= 16384) resolve()
+      })
+      sock!.on('error', () => resolve())
+      sock!.on('close', () => resolve())
+      const poll = setInterval(() => {
+        if (Date.now() - lastActivity > 5000 || total >= 16384) {
+          clearInterval(poll)
+          resolve()
+        }
+      }, 500)
+      setTimeout(() => {
+        clearInterval(poll)
+        resolve()
+      }, 15000)
+    })
+
+    const resp = Buffer.concat(chunks).toString('ascii')
+    const trace: string[] = [`INFO CONFIG 响应 ${total}B`]
+    let duplex = false
+    let duplexSeen = false
+    for (const raw of resp.split(/\r?\n/)) {
+      const line = raw.trim()
+      if (!/DUPLEX/i.test(line)) continue
+      duplexSeen = true
+      const eq = line.indexOf('=')
+      const v = eq >= 0 ? line.slice(eq + 1).trim().toUpperCase() : ''
+      if (['ON', 'YES', '1', 'TRUE', 'AVAILABLE'].includes(v)) duplex = true
+      trace.push(`能力行: ${line}`)
+    }
+    return {
+      ok: true,
+      duplex: duplexSeen ? duplex : false,
+      msg: duplexSeen
+        ? duplex
+          ? '打印机支持自动双面（DUPLEX 可用）'
+          : '打印机不支持自动双面（需手动翻纸双面）'
+        : '已读取打印机配置（未报告 DUPLEX 字段，按不支持处理）',
+      trace,
+    }
+  } catch (e: any) {
+    return { ok: false, msg: `能力探测失败：${e?.message || e}` }
+  } finally {
+    try { sock?.destroy() } catch {}
+  }
+}
+
 // ---------- HTTP 服务 ----------
 async function handleRequest(req: Request): Promise<Response> {
   const url = new URL(req.url)
@@ -429,7 +522,7 @@ async function handleRequest(req: Request): Promise<Response> {
   }
 
   if (path === '/ping' && method === 'GET') {
-    return json({ ok: true, service: 'brother-bridge', version: '2.0.1', port: PORT })
+    return json({ ok: true, service: 'brother-bridge', version: '2.0.3', port: PORT })
   }
 
   // Brother 扫描
@@ -467,11 +560,21 @@ async function handleRequest(req: Request): Promise<Response> {
     try {
       const buffers = jpegs.map((b: string) => Buffer.from(b, 'base64'))
       const mono = body.mono === true || body.colorMode === 'gray' || body.colorMode === 'mono'
-      const r = await brotherPrintJpegs(host, buffers, body.jobName || 'PaperMarker', mono)
+      const duplex = body.duplex === true // v2.0.3：自动双面（打印机支持时生效）
+      const r = await brotherPrintJpegs(host, buffers, body.jobName || 'PaperMarker', mono, duplex)
       return json(r, r.ok ? 200 : 500)
     } catch (e: any) {
       return json({ ok: false, msg: `桥接打印异常：${e?.message || e}` }, 500)
     }
+  }
+
+  // v2.0.3：打印机能力探测（PJL INFO CONFIG，查双面等）
+  if (path === '/probe/capabilities' && method === 'POST') {
+    const body = await req.json().catch(() => ({}))
+    const host = String(body.host || '').trim()
+    if (!host) return json({ ok: false, msg: '缺少 host 参数' }, 400)
+    const r = await probePrinterCapabilities(host)
+    return json(r, r.ok ? 200 : 500)
   }
 
   // 探测扫描仪
@@ -503,7 +606,8 @@ const BANNER = `
 ║  监听地址：http://localhost:${PORT}                        ║
 ║  健康检查：GET  /ping                                    ║
 ║  扫描：    POST /scan                                    ║
-║  打印：    POST /print                                   ║
+║  打印：    POST /print（支持 duplex 双面）               ║
+║  能力探测：POST /probe/capabilities（双面支持等）        ║
 ║  探测扫描：POST /probe/scan                              ║
 ║  探测打印：POST /probe/print                             ║
 ╠══════════════════════════════════════════════════════════╣

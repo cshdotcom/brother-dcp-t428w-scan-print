@@ -131,12 +131,13 @@ export async function bridgeScan(
   }
 }
 
-/** 通过桥接服务执行 Brother 直连打印（PWGRASTER 协议） */
+/** 通过桥接服务执行 Brother 直连打印（PWGRASTER 协议；duplex=自动双面） */
 export async function bridgePrint(
   host: string,
   jpegBase64List: string[],
   jobName?: string,
-  mono = false
+  mono = false,
+  duplex = false
 ): Promise<{ ok: boolean; msg: string }> {
   const base = getBridgeUrl()
   try {
@@ -146,7 +147,7 @@ export async function bridgePrint(
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ host, jpegs: jpegBase64List, jobName, mono }),
+        body: JSON.stringify({ host, jpegs: jpegBase64List, jobName, mono, duplex }),
       },
       120000
     )
@@ -199,6 +200,27 @@ export async function bridgeProbePrint(
     return await r.json()
   } catch (e: any) {
     return { ok: false, msg: `桥接探测失败：${e?.message || e}` }
+  }
+}
+
+/** 通过桥接查询打印机能力（PJL INFO CONFIG：自动双面等） */
+export async function bridgeProbeCapabilities(
+  host: string
+): Promise<{ ok: boolean; msg: string; duplex?: boolean }> {
+  const base = getBridgeUrl()
+  try {
+    const r = await fetchWithTimeout(
+      `${base}/probe/capabilities`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host }),
+      },
+      20000
+    )
+    return await r.json()
+  } catch (e: any) {
+    return { ok: false, msg: `桥接能力查询失败：${e?.message || e}` }
   }
 }
 

@@ -196,7 +196,8 @@ public class BridgeService extends Service {
             }
             String jobName = req.optString("jobName", "PaperMarker");
             boolean mono = req.optBoolean("mono", false) || "gray".equals(req.optString("colorMode", "")) || "mono".equals(req.optString("colorMode", ""));
-            BrotherTcp.ScanResult r = BrotherTcp.print(host, jpegs, jobName, mono);
+            boolean duplex = req.optBoolean("duplex", false); // v2.0.3：自动双面（打印机支持时生效）
+            BrotherTcp.ScanResult r = BrotherTcp.print(host, jpegs, jobName, mono, duplex);
             resp.put("ok", r.ok);
             resp.put("msg", r.msg);
             return resp.toString();
@@ -214,6 +215,16 @@ public class BridgeService extends Service {
             BrotherTcp.ScanResult r = BrotherTcp.probePrinter(host);
             resp.put("ok", r.ok);
             resp.put("msg", r.msg);
+            return resp.toString();
+        }
+
+        // v2.0.3：PJL INFO CONFIG 查询打印机能力（是否支持自动双面）
+        if ("/probe/capabilities".equals(path) && "POST".equals(method)) {
+            BrotherTcp.ScanResult r = BrotherTcp.probeCapabilities(host);
+            resp.put("ok", r.ok);
+            resp.put("msg", r.msg);
+            if (r.duplex != null) resp.put("duplex", r.duplex.booleanValue());
+            resp.put("trace", new JSONArray(r.trace));
             return resp.toString();
         }
 

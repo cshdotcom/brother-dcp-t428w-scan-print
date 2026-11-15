@@ -304,9 +304,14 @@ export function ScanView() {
             toast({ title: '无可打印页面', variant: 'destructive' })
             return
           }
-          const result = await bridgePrint(scannerCfg.host, jpegs, 'PaperMarker-Copy')
+          const result = await bridgePrint(scannerCfg.host, jpegs, 'PaperMarker-Copy', false, copyDuplex)
           if (result.ok) {
-            toast({ title: '复印已下发（经本地桥接）', description: result.msg })
+            toast({
+              title: '复印已下发（经本地桥接）',
+              description: copyDuplex
+                ? `${result.msg}；双面模式，注意按提示翻页`
+                : result.msg,
+            })
           } else {
             toast({ title: '桥接复印失败', description: result.msg, variant: 'destructive' })
           }
@@ -686,16 +691,16 @@ export function ScanView() {
               )}
             </button>
 
-            <div className="flex items-center gap-2 rounded-lg border p-2.5">
-              <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border p-2.5">
+              <div className="flex shrink-0 items-center gap-2">
                 <Printer className="h-4 w-4 text-muted-foreground" />
-                <Label className="text-xs whitespace-nowrap">双面</Label>
+                <Label className="text-xs whitespace-nowrap">双面复印</Label>
                 <Switch checked={copyDuplex} onCheckedChange={setCopyDuplex} />
               </div>
               <button
                 onClick={doCopy}
                 disabled={copying || pages.length === 0}
-                className="fx-btn-border-trace fx-icon-slide ml-auto !h-9 !px-4 !text-sm !text-amber-700 disabled:cursor-not-allowed disabled:opacity-60"
+                className="fx-btn-border-trace fx-icon-slide ml-auto min-w-0 flex-1 !h-9 !px-4 !text-sm !text-amber-700 sm:flex-none disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {copying ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Copy className="mr-2 h-4 w-4" />}
                 快速复印

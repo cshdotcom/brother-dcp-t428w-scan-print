@@ -23,7 +23,7 @@ import {
   Settings as SettingsIcon,
 } from 'lucide-react'
 import { api, fileUrl, type TaskDetail, type MarkLayers, type PrinterConfig } from '@/lib/pm'
-import { detectBridge, bridgePrint } from '@/lib/client/brother-bridge'
+import { detectBridge, bridgePrint, bridgeProbeCapabilities } from '@/lib/client/brother-bridge'
 import { usePm } from '@/lib/pm-store'
 import { useToast } from '@/hooks/use-toast'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -65,6 +65,13 @@ const CONTENT_OPTIONS: {
 type PrintMethod = 'ipp' | 'brother'
 // 注意：早期版本误用 'browser' 作为初始值（不在类型内），已改为空值态 + 默认回退
 
+/** v2.0.3 打印确认策略标签（一键打印前是否弹框） */
+const CONFIRM_POLICY_LABEL: Record<string, string> = {
+  auto: '直接打印（不询问）',
+  multi: '多页/多份/双面才询问',
+  ask: '每次都询问',
+}
+
 const METHOD_OPTIONS: {
   key: PrintMethod
   label: string
@@ -101,6 +108,19 @@ const LAYER_ITEMS: { key: keyof MarkLayers; label: string; hint?: string }[] = [
   { key: 'boxes', label: '题框' },
   { key: 'banner', label: '顶部分数条' },
 ]
+
+/**
+ * 纯标记层专用图层（v2.0.3）：只有勾/叉/半勾三个矢量符号，其余全部关闭。
+ * 用于把标记套印到学生原卷上（白底透明页，坐标与原卷严格对齐）。 */
+const MARKS_ONLY_LAYERS: Partial<MarkLayers> = {
+  marks: true,
+  scores: false,
+  answers: false,
+  reason: false,
+  solution: false,
+  boxes: false,
+  banner: false,
+}
 
 /** 浏览器直接打印预览层 */
 function BrowserPrintOverlay({
@@ -203,10 +223,14 @@ export function PrintPanel({ task }: { task: TaskDetail }) {
   const [dialogOpen, setDialogOpen] = useState(false)
   const [chosenContent, setChosenContent] = useState<SubType>('mark')
   const [chosenMethod, setChosenMethod] = useState<PrintMethod>('brother')
+  /** v2.0.3：一键打印确认策略（auto/multi/ask，保存为默认） */
+  const [confirmPolicy, setConfirmPolicy] = useState<'auto' | 'multi' | 'ask'>('multi')
   const [saveAsDefault, setSaveAsDefault] = useState(true)
   const [printerCfg, setPrinterCfg] = useState<PrinterConfig | null>(null)
   const [bridgeRunning, setBridgeRunning] = useState<boolean | null>(null)
-  const { layers, toggleLayer, printDefaults, setPrintDefaults } = usePm()
+  /** 打印机双面能力（null=未知；false=不支持，双面开关禁用） */
+  const [duplexCap, setDuplexCap] = useState<boolean | null>(null)
+  const { layers, toggleLayer, setLayers, printDefaults, setPrintDefaults } = usePm()
   const { toast } = useToast()
 
   // 加载打印机配置（判断 Brother host + mode）
@@ -220,14 +244,25 @@ export function PrintPanel({ task }: { task: TaskDetail }) {
     if (printDefaults.content) setChosenContent(printDefaults.content)
     if (printDefaults.copies) setCopies(printDefaults.copies)
     if (typeof printDefaults.duplex === 'boolean') setDuplex(printDefaults.duplex)
+    if (printDefaults.confirmPolicy) setConfirmPolicy(printDefaults.confirmPolicy)
   }, [])
 
-  // 打印对话框打开时探测桥接状态
+  // 打印对话框打开时探测桥接状态 + 打印机双面能力（PJL INFO CONFIG）
   useEffect(() => {
     if (dialogOpen && printerCfg?.mode === 'brother') {
-      detectBridge().then((b) => setBridgeRunning(b.running))
+      detectBridge().then((b) => {
+        setBridgeRunning(b.running)
+        // v2.0.3：桥接在线时顺带查询打印机能力（双面支持）
+        if (b.running && printerCfg?.host && duplexCap === null) {
+          bridgeProbeCapabilities(printerCfg.host)
+            .then((r) => {
+              if (r.ok) setDuplexCap(!!r.duplex)
+            })
+            .catch(() => {})
+        }
+      })
     }
-  }, [dialogOpen, printerCfg?.mode])
+  }, [dialogOpen, printerCfg?.mode, printerCfg?.host])
 
   const fileIds: Record<SubType, string | undefined> = {
     mark: task.markPdfFileId,
@@ -259,7 +294,9 @@ export function PrintPanel({ task }: { task: TaskDetail }) {
   const doBrowserPrint = async (sub: 'mark' | 'marks') => {
     setBusy(sub)
     try {
-      const r = await api.printPages(task.id, sub === 'mark', layers)
+      // v2.0.3：纯标记层只保留判分符号（白底只有勾叉，套印到原卷用）
+      const layersForPrint = sub === 'marks' ? MARKS_ONLY_LAYERS : layers
+      const r = await api.printPages(task.id, sub === 'mark', layersForPrint)
       if (!r.pages || r.pages.length === 0) {
         toast({ title: '没有可打印的页面', variant: 'destructive' })
         return
@@ -319,7 +356,9 @@ export function PrintPanel({ task }: { task: TaskDetail }) {
     }
   }
 
-  /** Brother 桥接直连打印：浏览器 → 桥接 → TCP 9100（不经服务器） */
+  /** Brother 桥接直连打印：浏览器 → 桥接 → TCP 9100（不经服务器）
+   *  v2.0.3 修复：「纯标记层」不再打印整张原卷 —— withImage 仅对批注卷生效；
+   *  纯标记层 = 白底 + 只有勾/叉/半勾矢量符号（坐标与原卷严格对齐，套印用） */
   const doBridgePrint = async (sub: SubType) => {
     setBusy(sub)
     try {
@@ -344,11 +383,12 @@ export function PrintPanel({ task }: { task: TaskDetail }) {
         return
       }
       // 获取渲染后的批注页 JPEG（dataUrl）。
-      // mark/marks：原图 + 标记层；answer/parse：纯标记层底（服务器暂不渲染文字版 JPEG，
-      // 降级为标记层 + 提示，完整文字版请用浏览器打印/下载 PDF）
-      const withImage = sub === 'mark' || sub === 'marks'
+      // v2.0.3：mark = 原图 + 标记层；marks = 纯标记层（白底只有勾叉，套印用）；
+      // answer/parse：纯标记层底（服务器暂不渲染文字版 JPEG，降级为标记层 + 提示）
+      const withImage = sub === 'mark'
+      const layersForPrint = sub === 'marks' ? MARKS_ONLY_LAYERS : layers
       const isTextVersion = sub === 'answer' || sub === 'parse'
-      const r = await api.printPages(task.id, withImage, layers)
+      const r = await api.printPages(task.id, withImage, layersForPrint)
       if (!r.pages || r.pages.length === 0) {
         toast({ title: '没有可打印的页面', variant: 'destructive' })
         return
@@ -365,8 +405,15 @@ export function PrintPanel({ task }: { task: TaskDetail }) {
           description: '桥接打印按标记层页面下发；如需纯文字版请用「浏览器打印」或下载 PDF',
         })
       }
+      if (sub === 'marks') {
+        toast({
+          title: '纯标记层打印',
+          description: '白底仅勾/叉/半勾符号，坐标与原卷对齐；可将学生原卷放回纸槽套印',
+        })
+      }
 
-      const result = await bridgePrint(host, allJpegs, `PaperMarker-${sub}`, mono)
+      // v2.0.3：duplex 透传（桥接 → PJL SET DUPLEX=ON）
+      const result = await bridgePrint(host, allJpegs, `PaperMarker-${sub}`, mono, duplex)
       if (result.ok) {
         toast({ title: `${SUB_LABEL[sub]} 桥接打印成功`, description: result.msg })
       } else {
@@ -392,6 +439,7 @@ export function PrintPanel({ task }: { task: TaskDetail }) {
         content: chosenContent,
         copies,
         duplex,
+        confirmPolicy,
       }
       setPrintDefaults(newDefaults)
       try {
@@ -424,10 +472,20 @@ export function PrintPanel({ task }: { task: TaskDetail }) {
     }
   }
 
-  /** 一键打印：用默认方案直接打印，不弹对话框 */
+  /** 一键打印：按默认方案直接打印；v2.0.3 确认策略：
+   *  auto=不问直接打 / multi=多页·多份·双面时弹框确认（默认） / ask=每次弹框 */
   const oneClickPrint = async () => {
     const method = printDefaults.method || 'brother'
     const content = (printDefaults.content || 'mark') as SubType
+    const policy = printDefaults.confirmPolicy || 'multi'
+    const multiJob =
+      (printDefaults.copies || 1) > 1 ||
+      printDefaults.duplex === true ||
+      (task.pages?.length || 1) > 1
+    if (policy === 'ask' || (policy === 'multi' && multiJob)) {
+      setDialogOpen(true)
+      return
+    }
     if (method === 'brother') {
       const bridge = await detectBridge()
       setBridgeRunning(bridge.running)
@@ -503,15 +561,49 @@ export function PrintPanel({ task }: { task: TaskDetail }) {
           <p className="mt-2 text-[10px] text-muted-foreground">
             错因与答案默认开启；打印/重新生成时按当前开关生效（练习名 · 学生得分 · 打印日期在分数条中）。
           </p>
+
+          {/* v2.0.3：标记符号大小配置（勾/叉/半对的缩放，用户反馈「打小一点」） */}
+          <div className="mt-2 rounded-md border bg-muted/30 px-2.5 py-2">
+            <div className="flex items-center justify-between gap-2">
+              <Label htmlFor="markScale" className="text-[11px] font-medium whitespace-nowrap">
+                标记大小
+              </Label>
+              <div className="flex items-center gap-2">
+                <input
+                  id="markScale"
+                  type="range"
+                  min={0.5}
+                  max={1.6}
+                  step={0.05}
+                  value={layers.markScale ?? 1}
+                  onChange={(e) => setLayers({ markScale: Number(e.target.value) })}
+                  className="h-1.5 w-28 accent-emerald-600 sm:w-36"
+                  aria-label="标记符号缩放"
+                />
+                <span className="w-10 text-right font-mono text-[11px] text-muted-foreground">
+                  ×{((layers.markScale ?? 1)).toFixed(2)}
+                </span>
+              </div>
+            </div>
+            <p className="mt-1 text-[10px] leading-tight text-muted-foreground">
+              勾/叉/半对符号缩放（0.5–1.6）。纯标记层套印学生原卷时建议 0.7–1.0，符号小而清晰不遮挡题目。
+            </p>
+          </div>
         </div>
 
         {/* 双面 / 份数 / 黑白 */}
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
           <div className="flex items-center justify-between rounded-lg border p-2.5">
             <Label htmlFor="duplex" className="text-xs">
               双面打印
+              {duplexCap === false && <span className="ml-1 text-[10px] text-amber-600">（不支持）</span>}
             </Label>
-            <Switch id="duplex" checked={duplex} onCheckedChange={setDuplex} />
+            <Switch
+              id="duplex"
+              checked={duplex}
+              disabled={duplexCap === false}
+              onCheckedChange={setDuplex}
+            />
           </div>
           <div className="flex items-center gap-2 rounded-lg border p-2.5">
             <Label htmlFor="copies" className="whitespace-nowrap text-xs">
@@ -534,6 +626,21 @@ export function PrintPanel({ task }: { task: TaskDetail }) {
             <Switch id="mono" checked={mono} onCheckedChange={setMono} />
           </div>
         </div>
+        {/* v2.0.3：双面能力提示（PJL INFO CONFIG 探测结果） */}
+        {duplexCap === false && (
+          <div className="flex items-start gap-1.5 rounded-md bg-amber-50 p-2 text-[11px] leading-tight text-amber-700 ring-1 ring-amber-200">
+            <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
+            <span>
+              已向打印机查询能力：此机型不支持自动双面。勾选双面需手动翻页套印；或到设置页「查询打印机能力」重新探测。
+            </span>
+          </div>
+        )}
+        {duplexCap === true && (
+          <div className="flex items-start gap-1.5 rounded-md bg-emerald-50 p-2 text-[11px] leading-tight text-emerald-700 ring-1 ring-emerald-200">
+            <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0" />
+            <span>已确认打印机支持自动双面（PJL DUPLEX 可用），双面打印时无需手动翻页。</span>
+          </div>
+        )}
 
         {duplex && (
           <div className="rounded-lg border border-amber-200 bg-amber-50/50 p-3">
@@ -566,7 +673,8 @@ export function PrintPanel({ task }: { task: TaskDetail }) {
           默认方案：{METHOD_OPTIONS.find((m) => m.key === printDefaults.method)?.label || '浏览器打印'} ·{' '}
           {SUB_LABEL[(printDefaults.content || 'mark') as SubType]} ·{' '}
           {printDefaults.copies || 1} 份 ·{' '}
-          {printDefaults.duplex ? '双面' : '单面'}
+          {printDefaults.duplex ? '双面' : '单面'} ·{' '}
+          一键{CONFIRM_POLICY_LABEL[printDefaults.confirmPolicy || 'multi']}
           <span className="ml-1 text-muted-foreground/60">（点击右侧齿轮可更改）</span>
         </div>
 
@@ -715,6 +823,43 @@ export function PrintPanel({ task }: { task: TaskDetail }) {
               <PrintFlowDiagram method={chosenMethod} />
             </div>
 
+            {/* 步骤 4：确认策略（v2.0.3：一键打印什么时候弹框询问） */}
+            <div className="space-y-2">
+              <Label className="text-xs font-semibold text-muted-foreground">
+                ④ 一键打印确认策略
+              </Label>
+              <div className="grid grid-cols-3 gap-1.5">
+                {(['auto', 'multi', 'ask'] as const).map((p) => {
+                  const active = confirmPolicy === p
+                  const desc =
+                    p === 'auto'
+                      ? '不询问直接打'
+                      : p === 'multi'
+                        ? '多页/多份/双面才问'
+                        : '每次打印都问'
+                  return (
+                    <button
+                      key={p}
+                      onClick={() => setConfirmPolicy(p)}
+                      className={`rounded-lg border px-2 py-2 text-center transition ${
+                        active
+                          ? 'border-emerald-500 bg-emerald-50'
+                          : 'border-muted hover:bg-muted/50'
+                      }`}
+                    >
+                      <div className={`text-xs font-semibold ${active ? 'text-emerald-700' : ''}`}>
+                        {p === 'auto' ? '自动直接打' : p === 'multi' ? '按情况询问' : '每张都问'}
+                      </div>
+                      <div className="mt-0.5 text-[10px] leading-tight text-muted-foreground">{desc}</div>
+                    </button>
+                  )
+                })}
+              </div>
+              <p className="text-[10px] leading-tight text-muted-foreground">
+                「按情况询问」= 单页单份单面直接打，多页/多份/双面时弹框确认（默认）；支持自动双面的机型会先探测能力再决定是否询问。
+              </p>
+            </div>
+
             {/* 当前配置摘要 */}
             <div className="rounded-lg bg-muted/40 p-2.5 text-[11px]">
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -728,7 +873,14 @@ export function PrintPanel({ task }: { task: TaskDetail }) {
                   份数：<b className="text-foreground">{copies}</b>
                 </span>
                 <span>
-                  双面：<b className="text-foreground">{duplex ? '是' : '否'}</b>
+                  双面：
+                  <b className="text-foreground">{duplex ? '是' : '否'}</b>
+                  {duplexCap === false && duplex && (
+                    <span className="ml-1 text-[10px] text-amber-600">（手动翻页）</span>
+                  )}
+                </span>
+                <span>
+                  确认：<b className="text-foreground">{CONFIRM_POLICY_LABEL[confirmPolicy]}</b>
                 </span>
               </div>
             </div>

@@ -32,6 +32,8 @@ export interface RenderLayers {
   solution: boolean
   boxes: boolean
   banner: boolean
+  /** 标记符号缩放（0.5–1.6，1=标准）v2.0.3 */
+  markScale?: number
 }
 
 export const DEFAULT_LAYERS: RenderLayers = {
@@ -42,6 +44,7 @@ export const DEFAULT_LAYERS: RenderLayers = {
   solution: false,
   boxes: true,
   banner: true,
+  markScale: 1,
 }
 
 export function normalizeLayers(raw: any): RenderLayers {
@@ -49,6 +52,9 @@ export function normalizeLayers(raw: any): RenderLayers {
   if (raw && typeof raw === 'object') {
     for (const k of Object.keys(DEFAULT_LAYERS) as (keyof RenderLayers)[]) {
       if (typeof raw[k] === 'boolean') l[k] = raw[k]
+    }
+    if (typeof raw.markScale === 'number' && raw.markScale >= 0.5 && raw.markScale <= 1.6) {
+      l.markScale = raw.markScale
     }
   }
   return l
@@ -152,20 +158,18 @@ function drawCross(doc: PDFDocument, cx: number, cy: number, size: number, color
   doc.restore()
 }
 
-/** 绘制半对标记 ⍻：完整勾 + 勾上部小叉（矢量，非字符） */
+/** 绘制半对标记（v2.0.3 重制）：完整勾 + 贯穿斜杠（矢量，非字符）
+ *  旧版「勾上部小叉」不像半对半错；新版勾被一斜杠划过（老师批改习惯），
+ *  与全对（光勾）、全错（光叉）视觉上均一眼区分。 */
 function drawHalfCheck(doc: PDFDocument, cx: number, cy: number, size: number, color: string) {
   drawCheck(doc, cx, cy, size, color)
   doc.save()
-  doc.lineWidth(Math.max(0.7, size * 0.11))
+  doc.lineWidth(Math.max(0.7, size * 0.12))
   doc.strokeColor(color)
   doc.lineCap('round')
-  const r = size * 0.2
-  const xc = cx + size * 0.08
-  const yc = cy - size * 0.26
-  doc.moveTo(xc - r, yc - r)
-  doc.lineTo(xc + r, yc + r)
-  doc.moveTo(xc + r, yc - r)
-  doc.lineTo(xc - r, yc + r)
+  // 贯穿斜杠：左上 → 右下，穿过勾的两臂
+  doc.moveTo(cx - size * 0.33, cy - size * 0.44)
+  doc.lineTo(cx + size * 0.34, cy + size * 0.38)
   doc.stroke()
   doc.restore()
 }
@@ -323,11 +327,12 @@ function drawBlankMarks(
   if (!layers.marks) return
   const blanks = parseBlanks(a.blanksJson)
   if (blanks.length === 0) return
+  const scale = layers.markScale || 1
   const marks = computeBlankMarks(blanks)
   for (const m of marks) {
     const cx = rect.x + m.cx * rect.w
     const cy = rect.y + m.cy * rect.h
-    const size = m.size * rect.w
+    const size = m.size * rect.w * scale
     drawJudgeMark(doc, m.judge as JudgeType, cx, cy, size)
     // 小得分（标记右侧）
     if (layers.scores && m.scoreText) {
@@ -383,9 +388,9 @@ function drawPageAnnotations(
       doc.restore()
     }
 
-    // 题级判分符号（题号旁，v3 小号）
+    // 题级判分符号（题号旁，v3 小号；markScale 可再缩放）
     if (layers.marks) {
-      drawJudgeMark(doc, a.judgeType, mx, my, markSize)
+      drawJudgeMark(doc, a.judgeType, mx, my, markSize * (layers.markScale || 1))
     }
 
     // 每题得分（小字，框内右下角；单空题已有空旁小得分，不重复）

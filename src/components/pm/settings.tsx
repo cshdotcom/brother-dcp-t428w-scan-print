@@ -7,6 +7,7 @@ import {
   Save,
   CheckCircle2,
   XCircle,
+  AlertCircle,
   Printer,
   Info,
   ScanLine,
@@ -34,7 +35,12 @@ import {
   setStoredToken,
 } from '@/lib/pm'
 import { clientProbeIpp, clientProbeBrother, clientProbeScanner } from '@/lib/client/net-probe'
-import { getBridgeUrl, setBridgeUrl as persistBridgeUrl, DEFAULT_BRIDGE_URL } from '@/lib/client/brother-bridge'
+import {
+  getBridgeUrl,
+  setBridgeUrl as persistBridgeUrl,
+  DEFAULT_BRIDGE_URL,
+  bridgeProbeCapabilities,
+} from '@/lib/client/brother-bridge'
 import {
   getBridgeSource,
   setBridgeSource as persistBridgeSource,
@@ -70,6 +76,14 @@ export function Settings() {
   const [saving, setSaving] = useState(false)
   const [probing, setProbing] = useState(false)
   const [probeResult, setProbeResult] = useState<{ ok: boolean; msg: string; detail?: string } | null>(null)
+  /** v2.0.3：打印机能力探测（PJL INFO CONFIG：双面支持、协议信息） */
+  const [capProbing, setCapProbing] = useState(false)
+  const [capResult, setCapResult] = useState<{
+    ok: boolean
+    msg: string
+    duplex?: boolean
+    trace?: string[]
+  } | null>(null)
   const [sSaving, setSSaving] = useState(false)
   const [sProbing, setSProbing] = useState(false)
   const [sProbeResult, setSProbeResult] = useState<{
@@ -397,6 +411,31 @@ export function Settings() {
     }
   }
 
+  // v2.0.3：查询打印机能力（浏览器 → 本地桥接 → PJL INFO CONFIG → 9100）
+  // 返回双面支持等能力；需 Brother 模式 + 桥接在线
+  const probeCaps = async () => {
+    if (!cfg || cfg.mode !== 'brother' || !cfg.host) {
+      toast({ title: '请先配置 Brother 打印机 IP', variant: 'destructive' })
+      return
+    }
+    setCapProbing(true)
+    setCapResult(null)
+    try {
+      const r = await bridgeProbeCapabilities(cfg.host)
+      setCapResult(r)
+      toast({
+        title: r.ok ? (r.duplex ? '支持自动双面' : '不支持自动双面') : '能力查询失败',
+        description: r.msg,
+        variant: r.ok ? 'default' : 'destructive',
+      })
+    } catch (e: any) {
+      setCapResult({ ok: false, msg: e?.message || String(e) })
+      toast({ title: '能力查询异常', description: e?.message, variant: 'destructive' })
+    } finally {
+      setCapProbing(false)
+    }
+  }
+
   // ---------- API Key 操作 ----------
   const createKey = async () => {
     if (!newKeyName.trim()) {
@@ -713,11 +752,50 @@ export function Settings() {
               {probing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wifi className="mr-2 h-4 w-4" />}
               {cfg.mode === 'brother' ? '测试 9100 端口' : '测试 IPP 连接'}
             </Button>
+            {cfg.mode === 'brother' && (
+              <Button onClick={probeCaps} disabled={capProbing} variant="outline" className="flex-1">
+                {capProbing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Printer className="mr-2 h-4 w-4" />}
+                查询打印机能力
+              </Button>
+            )}
             <Button onClick={save} disabled={saving} className="flex-1 bg-emerald-600 hover:bg-emerald-700">
               {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
               保存配置
             </Button>
           </div>
+
+          {capResult && (
+            <Alert variant={capResult.ok ? 'default' : 'destructive'}>
+              {capResult.ok ? (
+                capResult.duplex ? (
+                  <CheckCircle2 className="h-4 w-4" />
+                ) : (
+                  <AlertCircle className="h-4 w-4" />
+                )
+              ) : (
+                <XCircle className="h-4 w-4" />
+              )}
+              <AlertTitle>
+                {capResult.ok
+                  ? capResult.duplex
+                    ? '打印机支持自动双面'
+                    : '打印机不支持自动双面'
+                  : '能力查询失败'}
+              </AlertTitle>
+              <AlertDescription className="space-y-1">
+                <p>{capResult.msg}</p>
+                <p className="text-[11px] text-muted-foreground">
+                  探测方式：PJL INFO CONFIG（端口 9100，经本地桥接）。支持双面的机型勾选「双面打印」即自动翻页；
+                  不支持的机型双面需手动翻纸套印。
+                </p>
+                {capResult.trace && capResult.trace.length > 0 && (
+                  <pre className="max-h-24 overflow-y-auto rounded bg-muted/60 p-1.5 text-[10px] leading-tight text-muted-foreground">
+                    {capResult.trace.join('\n')}
+                  </pre>
+                )}
+              </AlertDescription>
+            </Alert>
+          )}
 
           {probeResult && (
             <Alert variant={probeResult.ok ? 'default' : 'destructive'}>

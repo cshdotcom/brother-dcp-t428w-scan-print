@@ -38,17 +38,25 @@ jobs:
           echo "android_jar=$AJAR" >> $GITHUB_OUTPUT
           ls -la "$BT/aapt2" "$BT/d8" "$BT/zipalign" "$BT/apksigner" "$AJAR"
 
-      - name: Generate debug keystore
+      - name: Reuse committed keystore (generate only if missing)
         run: |
-          keytool -genkey -v \
-            -keystore android-bridge/papermarker.keystore \
-            -alias papermarker \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -storepass papermarker2024 \
-            -keypass papermarker2024 \
-            -dname "CN=PaperMarker, OU=Dev, O=PaperMarker, L=City, ST=State, C=CN"
+          # v2.0.3：仓库已提交 papermarker.keystore —— CI 复用同一签名，
+          # 用户升级安装不再需要「卸载重装」。仅缺失时才重新生成。
+          if [ -f android-bridge/papermarker.keystore ]; then
+            echo "使用仓库内 keystore（签名与 v2.0.3 发布 APK 一致）"
+            keytool -list -keystore android-bridge/papermarker.keystore \
+              -storepass papermarker2024 2>/dev/null | head -5 || true
+          else
+            keytool -genkey -v \
+              -keystore android-bridge/papermarker.keystore \
+              -alias papermarker \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass papermarker2024 \
+              -keypass papermarker2024 \
+              -dname "CN=PaperMarker, OU=Dev, O=PaperMarker, L=City, ST=State, C=CN"
+          fi
 
-      - name: Build Android Bridge APK (v2.0.1 PWGRASTER + PNA)
+      - name: Build Android Bridge APK (v2.0.3 full-app WebView + scan timeout fix)
         run: |
           cd android-bridge
           BT="${{ steps.find-tools.outputs.bt }}"
@@ -80,12 +88,14 @@ jobs:
             --manifest AndroidManifest.xml \
             --java "$OUT/gen" \
             --min-sdk-version 26 --target-sdk-version 34 \
-            --version-code 21 --version-name "2.0.1" \
+            --version-code 23 --version-name "2.0.3" \
             --auto-add-overlay \
             "$OUT/res-compiled/res.zip"
 
           echo "[4/7] javac 编译 Java"
           find src "$OUT/gen" -name "*.java" > "$OUT/sources.txt"
+          # 注意：源码里所有内部回调都是命名类（无匿名内部类）——
+          # 部分 d8 版本对 javac21/17 生成的匿名类有 NPE 缺陷，命名类安全。
           javac -source 11 -target 11 -nowarn -encoding UTF-8 \
             -classpath "$AJAR" \
             -d "$OUT/classes" @"$OUT/sources.txt"
@@ -133,7 +143,7 @@ jobs:
         run: |
           cd mini-services/brother-bridge && bun install
 
-      - name: Build Windows bridge .exe (v2 PWGRASTER + PNA 修复版)
+      - name: Build Windows bridge .exe (v2.0.3 scan-timeout fix + duplex + probe)
         run: |
           mkdir -p dist
           bun build mini-services/brother-bridge/standalone.ts \
@@ -191,23 +201,30 @@ jobs:
           chmod +x release/papermarker-bridge-linux 2>/dev/null || true
           # 附带使用说明
           cat > release/README-bridges.txt << 'EOF'
-          PaperMarker Brother 桥接服务 v2.0.1（PWGRASTER + PNA 修复版）
+          PaperMarker Brother 桥接服务 v2.0.3（扫描超时修复 + 自动双面 + 全功能安卓端）
 
-          本版本修复：
-          1. 【关键】Private Network Access：HTTPS 网页访问 http://localhost:3790 不再被
-             Chrome/Edge（安卓/桌面）拦截 —— 此前"根本没有向打印机发送任何字节"的根因之一。
-          2. 【关键·安卓】HTTP 请求体解析改字节级读取，修复大体积打印请求（几百 KB base64）
-             被 BufferedReader 预读吞字节导致 JSON 损坏的致命 bug。
-          3. 【关键·打印协议】改 PWGRASTER 光栅协议（官方 brdcpt230filter 逆向）：
-             JPEG→A4@300dpi 光栅 + RLE 行压缩 + 完整 Brother PJL 参数头；
-             旧版裸 JPEG（ENTER LANGUAGE=JPEG）会被固件静默丢弃。
-             v2.0.1：新增黑白（Mono/GRAYSCALE）省墨选项，全链路生效。
-          4. 扫描 -NG 401 会话被占用 → ESC R 复位自动重试；收尾断连时回收完整 JPEG 页。
+          本版本修复（v2.0.3）：
+          1. 【关键】扫描 Read timed out：>300dpi / 彩色扫描只扫一小部分就中断。
+             根因 = 旧版读取器用「绝对 deadline」计时，大图数据慢速流动中被从中砍断。
+             新版改为「空闲超时」语义——只要有字节到达就续期，数据在流就永不超时；
+             600dpi/彩色上限放宽到 120s。双端（Windows/Linux/Android）同步修复。
+          2. 【关键】纯标记层打印整张背景：现在「标记层」只打勾/叉/半对小矢量符号
+             （白纸无框无底），坐标与原卷对齐，可把学生原卷放回纸槽套印；
+             标记大小可调（0.5–1.6 倍）；半对符号重制 = 勾 + 贯穿斜杠。
+          3. 自动双面：桥接新增 PJL INFO CONFIG 能力探测（设置页「查询打印机能力」）；
+             支持双面的机型勾选双面即自动翻页打印，不支持的机型会禁用开关并提示。
+          4. 【安卓】新增「打开主应用（全部功能）」：WebView 内嵌完整 PaperMarker
+             （扫描/拍照批改/AI 复核/打印/设置），支持相机拍照与文件上传，
+             打开时自动启动桥接。
+          5. 一键打印确认策略可配：自动直接打 / 多页·多份·双面才问（默认）/ 每次都问。
+          6. 修复桌面桥接 /print 的 mono 变量未定义运行时错误；复印/打印支持双面透传。
+          7. 修复扫描页「快速复印」按钮在窄屏溢出显示不全的问题。
 
           使用方法：
           - Windows：双击 papermarker-bridge.exe，保持窗口开启
           - Linux：chmod +x papermarker-bridge-linux && ./papermarker-bridge-linux
-          - Android：安装 PaperMarker-Bridge.apk → 打开 → 点「启动桥接服务」
+          - Android：安装 PaperMarker-Bridge.apk → 首次「设置服务器地址」填网页地址
+            → 点「打开主应用（全部功能）」；或只点「启动桥接服务」当纯桥接用
 
           之后浏览器打开 PaperMarker 网页 → 设置 → 打印机配置 → Brother 模式 → 填打印机 IP。
           网页会自动探测 localhost:3790，经桥接直连打印机（TCP 9100 打印 / 54921 扫描）。
